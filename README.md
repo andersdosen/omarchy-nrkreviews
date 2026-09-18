@@ -92,7 +92,7 @@ the panel clears the dot.
 
 - Review listings come from `www.nrk.no/komponenter/api/autonomous-content/plugs.json`,
   fetched both when you open the panel and by the periodic background check.
-- Thumbnails load from NRK's own image CDN (`gfx.nrk.no`), resized to a
+- Thumbnails load from NRK's own image CDN (`bilder.nrk.no`), resized to a
   small size, and are cached to disk under
   `$XDG_CACHE_HOME/omarchy-nrkreviews/thumbs/` (`~/.cache/...` if unset)
   so browsing the same list twice doesn't re-fetch them.

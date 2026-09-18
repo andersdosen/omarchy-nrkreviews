@@ -168,6 +168,16 @@ Panel {
     return /^https:\/\/([a-z0-9-]+\.)*nrk\.no\//i.test(String(url || ""))
   }
 
+  // Thumbnail URLs come signed (a token=exp=…~hmac=… query param) from
+  // NRK's own `imgSrcSet` field — this is the one host that signature is
+  // ever issued for, confirmed live (the bare, unsigned URL 401s). Same
+  // host-allowlist reasoning as isTrustedReviewUrl above, just a tighter
+  // allowlist since this is specifically NRK's image CDN, not any nrk.no
+  // subdomain.
+  function isTrustedImageSrc(url) {
+    return /^https:\/\/bilder\.nrk\.no\//i.test(String(url || ""))
+  }
+
   function openResult(item) {
     var url = root.reviewUrl(item)
     if (!url || !root.isTrustedReviewUrl(url)) return
@@ -931,47 +941,68 @@ Panel {
 
     property string localThumbPath: ""
 
-    // Picks the "160"-wide derivate out of NRK's crop/derivate JSON shape
-    // (an array of single-key {"<width>": "<hash>"} objects), preferring
-    // the primary teaser crop and falling back to the image's own top-level
-    // derivates when no crop is present.
-    function findDerivate(list, width) {
-      if (!list) return ""
-      for (var i = 0; i < list.length; i++) {
-        var o = list[i]
-        if (o && o[width] !== undefined) return o[width]
+    // NRK dropped the old `image.crops[].derivates` width->hash shape at
+    // some point (confirmed live — current responses have no `image` key
+    // at all) in favor of a plain HTML-style `imgSrcSet`: a comma-space
+    // separated list of "<signed-url> <width>w" entries. Each URL is
+    // pre-signed for one exact width/crop and 401s without its token, so
+    // (unlike the old scheme) we can't build the URL ourselves — we have
+    // to pick one of NRK's own entries verbatim. `\S+` for the URL is
+    // safe even though the query string itself contains literal commas
+    // (im=Crop,rect=(...),gravity=...) — those commas are never
+    // whitespace-adjacent, only the entry separator's ", " is, so
+    // matching on whitespace-bounded tokens can't mis-split a URL.
+    function parseImgSrcSet(srcset) {
+      var out = []
+      var re = /(\S+)\s+(\d+)w/g
+      var m
+      while ((m = re.exec(String(srcset || ""))) !== null) {
+        out.push({ url: m[1], width: parseInt(m[2], 10) })
       }
-      return ""
+      return out
     }
 
-    function thumbHash() {
-      if (!row.item || !row.item.image) return ""
-      var img = row.item.image
-      var crops = img.crops
-      var fromCrop = (crops && crops.length > 0) ? row.findDerivate(crops[0].derivates, "160") : ""
-      return fromCrop || row.findDerivate(img.derivates, "160")
+    // Prefers the 160w entry (matches the thumbnail width the old schema
+    // was deliberately picked for); falls back to the narrowest available
+    // entry if NRK ever stops offering exactly that width.
+    function thumbImageSrc() {
+      if (!row.item) return ""
+      var variants = row.parseImgSrcSet(row.item.imgSrcSet)
+      if (variants.length === 0) return ""
+      for (var i = 0; i < variants.length; i++) {
+        if (variants[i].width === 160) return variants[i].url
+      }
+      variants.sort(function(a, b) { return a.width - b.width })
+      return variants[0].url
     }
 
-    // Only ever handed to fetch-image (which itself re-validates the host)
-    // and used to build a local cache filename — still worth confirming
-    // the shape is exactly what NRK's CDN hands back before either.
-    function isValidHash(hash) {
-      return /^[A-Za-z0-9_-]+$/.test(String(hash || ""))
+    // The image id (path segment right after the host) is stable per
+    // image regardless of which width/crop variant is requested, so it's
+    // what we key the on-disk cache filename by — same role the old
+    // schema's bare "hash" played. Only ever handed to fetch-image
+    // (which itself re-validates the host) and used to build a local
+    // cache filename — the character class match is still worth
+    // confirming explicitly before either, rather than trusting the
+    // capture group alone.
+    function thumbCacheKey(url) {
+      var m = /^https:\/\/bilder\.nrk\.no\/([A-Za-z0-9_-]+)\?/.exec(String(url || ""))
+      return (m && /^[A-Za-z0-9_-]+$/.test(m[1])) ? m[1] : ""
     }
 
     function startThumbFetch() {
       row.localThumbPath = ""
       thumbFetchProc.running = false
-      var hash = row.thumbHash()
-      if (!row.isValidHash(hash)) return
-      var outPath = root.thumbCacheDir + "/" + hash + ".jpg"
-      if (root.thumbCacheKnownGood[hash]) {
+      var src = row.thumbImageSrc()
+      var key = row.thumbCacheKey(src)
+      if (!key || !root.isTrustedImageSrc(src)) return
+      var outPath = root.thumbCacheDir + "/" + key + ".jpg"
+      if (root.thumbCacheKnownGood[key]) {
         row.localThumbPath = "file://" + outPath
         return
       }
-      thumbFetchProc.command = [root.fetchImageHelper, "https://gfx.nrk.no/" + hash, outPath]
+      thumbFetchProc.command = [root.fetchImageHelper, src, outPath]
       thumbFetchProc.__outPath = outPath
-      thumbFetchProc.__hash = hash
+      thumbFetchProc.__hash = key
       thumbFetchProc.running = true
     }
 
