@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Fetches an NRK teaser-image thumbnail to a local file under a hard byte
+# cap, with a content-type check, a timeout, and host revalidation on every
+# redirect hop. The image URL is unauthenticated third-party content, so
+# none of this can be delegated to a single "curl -L" call that would trust
+# whatever a compromised/MITM'd response redirects it to next, or let the
+# response declare its own size. Mirrors fetch-poster in the sibling
+# andersdosen.imdbsearch plugin.
+set -uo pipefail
+
+max_bytes=102400      # 100KiB: a 160w derivate runs a few KB, so this leaves ample headroom
+max_redirects=5
+per_request_timeout=8
+overall_timeout=15
+host_re='^https://gfx\.nrk\.no/'
+
+usage() { echo "usage: $(basename "$0") <url> <output-path>" >&2; exit 2; }
+[[ $# -eq 2 ]] || usage
+
+url=$1
+out=$2
+tmp="$out.part"
+
+# Already cached from an earlier fetch — a given derivate's bytes don't
+# change, so there's nothing to revalidate.
+[[ -s "$out" ]] && exit 0
+
+cleanup() { rm -f "$tmp"; }
+trap cleanup EXIT
+
+start_ts=$(date +%s)
+redirect_count=0
+
+while :; do
+  if (( $(date +%s) - start_ts >= overall_timeout )); then
+    echo "fetch-image: overall timeout exceeded" >&2
+    exit 1
+  fi
+
+  if ! [[ "$url" =~ $host_re ]]; then
+    echo "fetch-image: refusing untrusted host: $url" >&2
+    exit 1
+  fi
+
+  rm -f "$tmp"
+  # -D- dumps response headers to stdout (captured below); -o writes the
+  # body to $tmp. --max-filesize enforces the byte cap against the actual
+  # downloaded bytes as they arrive, not just a declared Content-Length.
+  # --max-redirs 0 disables curl's own redirect following: each hop is
+  # handled manually below so its target host can be revalidated before
+  # it's ever requested.
+  headers=$(curl -sS \
+    --max-time "$per_request_timeout" \
+    --max-filesize "$max_bytes" \
+    --max-redirs 0 \
+    -D - -o "$tmp" \
+    "$url")
+  status=$?
+
+  if [[ $status -ne 0 ]]; then
+    echo "fetch-image: curl failed (exit $status)" >&2
+    exit 1
+  fi
+
+  { read -r code; read -r location; read -r content_type; } < <(
+    printf '%s\n' "$headers" | tr -d '\r' | awk '
+      NR==1                           { print $2; next }
+      tolower($0) ~ /^location:/      { sub(/^[^:]*:[ \t]*/, ""); loc = $0 }
+      tolower($0) ~ /^content-type:/  { sub(/^[^:]*:[ \t]*/, ""); ct = tolower($0) }
+      END                             { print loc; print ct }
+    '
+  )
+
+  case "$code" in
+    301|302|303|307|308)
+      redirect_count=$((redirect_count + 1))
+      if (( redirect_count > max_redirects )); then
+        echo "fetch-image: too many redirects" >&2
+        exit 1
+      fi
+      if ! [[ "$location" =~ ^https:// ]]; then
+        echo "fetch-image: refusing non-absolute/non-https redirect" >&2
+        exit 1
+      fi
+      url=$location
+      continue
+      ;;
+    200)
+      case "$content_type" in
+        image/*) ;;
+        *)
+          echo "fetch-image: unexpected content-type: $content_type" >&2
+          exit 1
+          ;;
+      esac
+      size=$(stat -c%s "$tmp" 2>/dev/null || wc -c <"$tmp")
+      if (( size > max_bytes )); then
+        echo "fetch-image: response exceeded byte cap" >&2
+        exit 1
+      fi
+      mv "$tmp" "$out"
+      trap - EXIT
+      exit 0
+      ;;
+    *)
+      echo "fetch-image: unexpected HTTP status: $code" >&2
+      exit 1
+      ;;
+  esac
+done

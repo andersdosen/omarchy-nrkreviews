@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "andersdosen.nrkreviews",
+  "name": "NRK Anmeldelser",
+  "version": "1.0.0",
+  "author": "Anders Døsen",
+  "license": "MIT",
+  "description": "Browse NRK's reviews of film, series, music, games, books, and more, filterable by category — right from the bar.",
+  "languages": ["nb", "en", "sv", "de", "da", "fi", "es", "it"],
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "NRK Anmeldelser",
+    "description": "Browse NRK's reviews, filterable by category",
+    "category": "Utilities",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

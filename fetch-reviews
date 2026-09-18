@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Fetches NRK's own review-listing endpoint to stdout under a hard byte cap,
+# with a response-status and content-type check, before any of the body
+# ever reaches Panel.qml's JSON.parse. Mirrors fetch-poster/fetch-suggest's
+# approach in the sibling andersdosen.imdbsearch plugin to the same problem.
+set -uo pipefail
+
+max_bytes=262144      # a 10-item page runs ~20-45KB in practice; generous headroom
+timeout=8
+host_re='^https://www\.nrk\.no/komponenter/api/autonomous-content/plugs\.json\?'
+
+usage() { echo "usage: $(basename "$0") <url>" >&2; exit 2; }
+[[ $# -eq 1 ]] || usage
+url=$1
+
+if ! [[ "$url" =~ $host_re ]]; then
+  echo "fetch-reviews: refusing untrusted host: $url" >&2
+  exit 1
+fi
+
+tmp=$(mktemp)
+cleanup() { rm -f "$tmp"; }
+trap cleanup EXIT
+
+# -D- dumps response headers to stdout (captured below); -o writes the body
+# to $tmp, capped by --max-filesize against the actual downloaded bytes as
+# they arrive, not just a declared Content-Length. Redirects are not
+# followed (no -L): the URL is built entirely from a fixed, known host, so
+# a redirect response is simply rejected below by the status check.
+# --compressed requests gzip and decodes it transparently — confirmed
+# live this endpoint supports it and the decoded bytes are byte-identical
+# either way, just ~20KB smaller on the wire per page (an 82% cut on a
+# 10-item page in testing). --max-filesize still bounds the *decoded*
+# size (confirmed separately), so the byte cap below means the same thing
+# it always did.
+headers=$(curl -sS \
+  --compressed \
+  --max-time "$timeout" \
+  --max-filesize "$max_bytes" \
+  -D - -o "$tmp" \
+  "$url")
+status=$?
+
+if [[ $status -ne 0 ]]; then
+  echo "fetch-reviews: curl failed (exit $status)" >&2
+  exit 1
+fi
+
+code=$(printf '%s\n' "$headers" | awk 'NR==1{print $2}')
+if [[ "$code" != "200" ]]; then
+  echo "fetch-reviews: unexpected HTTP status: $code" >&2
+  exit 1
+fi
+
+content_type=$(printf '%s\n' "$headers" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type"{print tolower($2); exit}')
+case "$content_type" in
+  application/json*) ;;
+  *)
+    echo "fetch-reviews: unexpected content-type: $content_type" >&2
+    exit 1
+    ;;
+esac
+
+# Belt-and-suspenders check on the actual bytes written, independent of
+# whether this curl build/protocol path honors --max-filesize.
+size=$(stat -c%s "$tmp" 2>/dev/null || wc -c <"$tmp")
+if (( size > max_bytes )); then
+  echo "fetch-reviews: response exceeded byte cap" >&2
+  exit 1
+fi
+
+cat "$tmp"
