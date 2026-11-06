@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "andersdosen.nrkreviews",
   "name": "NRK Anmeldelser",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Anders Døsen",
   "license": "MIT",
   "description": "Browse NRK's reviews of film, series, music, games, books, and more, filterable by category — right from the bar.",
