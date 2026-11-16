@@ -19,32 +19,39 @@ if ! [[ "$url" =~ $host_re ]]; then
 fi
 
 tmp=$(mktemp)
-cleanup() { rm -f "$tmp"; }
+header_file=$(mktemp)
+cleanup() { rm -f "$tmp" "$header_file"; }
 trap cleanup EXIT
 
-# -D- dumps response headers to stdout (captured below); -o writes the body
-# to $tmp, capped by --max-filesize against the actual downloaded bytes as
-# they arrive, not just a declared Content-Length. Redirects are not
-# followed (no -L): the URL is built entirely from a fixed, known host, so
-# a redirect response is simply rejected below by the status check.
-# --compressed requests gzip and decodes it transparently — confirmed
-# live this endpoint supports it and the decoded bytes are byte-identical
-# either way, just ~20KB smaller on the wire per page (an 82% cut on a
-# 10-item page in testing). --max-filesize still bounds the *decoded*
-# size (confirmed separately), so the byte cap below means the same thing
-# it always did.
-headers=$(curl -sS \
+# --max-filesize is checked by curl against the transfer as it arrives on
+# the wire — i.e. still-compressed bytes when --compressed is in play, or
+# a declared Content-Length that likewise describes the compressed size.
+# It does NOT bound the decoded size, so a malicious response can still
+# gzip-expand into something far larger than max_bytes by the time it
+# reaches disk. --max-filesize is kept only as a cheap early-abort when
+# the server declares a huge size upfront; the actual cap on decoded
+# bytes written to $tmp is `head -c`, below, which truncates the decoded
+# stream itself regardless of compression ratio — bounding disk/tmpfs
+# usage to max_bytes+1 no matter how much the response inflates.
+# -D writes response headers to $header_file; -o is not used here because
+# the body must flow through the pipe into head, not straight to a file.
+# Redirects are not followed (no -L): the URL is built entirely from a
+# fixed, known host, so a redirect response is simply rejected below by
+# the status check.
+curl -sS \
   --compressed \
   --max-time "$timeout" \
   --max-filesize "$max_bytes" \
-  -D - -o "$tmp" \
-  "$url")
-status=$?
+  -D "$header_file" \
+  "$url" | head -c $((max_bytes + 1)) >"$tmp"
+status=${PIPESTATUS[0]}
 
 if [[ $status -ne 0 ]]; then
   echo "fetch-reviews: curl failed (exit $status)" >&2
   exit 1
 fi
+
+headers=$(tr -d '\r' <"$header_file")
 
 code=$(printf '%s\n' "$headers" | awk 'NR==1{print $2}')
 if [[ "$code" != "200" ]]; then
@@ -52,7 +59,7 @@ if [[ "$code" != "200" ]]; then
   exit 1
 fi
 
-content_type=$(printf '%s\n' "$headers" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type"{print tolower($2); exit}')
+content_type=$(printf '%s\n' "$headers" | awk -F': ' 'tolower($1)=="content-type"{print tolower($2); exit}')
 case "$content_type" in
   application/json*) ;;
   *)
@@ -61,8 +68,9 @@ case "$content_type" in
     ;;
 esac
 
-# Belt-and-suspenders check on the actual bytes written, independent of
-# whether this curl build/protocol path honors --max-filesize.
+# Belt-and-suspenders check on the actual bytes written. head's own cap
+# above already bounds this to max_bytes+1 at most, so this just confirms
+# the stream wasn't truncated mid-cap (i.e. the real body fit).
 size=$(stat -c%s "$tmp" 2>/dev/null || wc -c <"$tmp")
 if (( size > max_bytes )); then
   echo "fetch-reviews: response exceeded byte cap" >&2
