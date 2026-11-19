@@ -21,6 +21,15 @@ Item {
 
   readonly property string fetchReviewsHelper: Qt.resolvedUrl("fetch-reviews").toString().replace(/^file:\/\//, "")
 
+  // omarchy-notification-send's -i/--icon only matches a system icon-theme
+  // name or an installed .desktop entry's icon (confirmed by reading the
+  // shell's own notifications/Icons.js and Toast.qml — "nothing here
+  // touches a file" for that field), neither of which this plugin has.
+  // --image is the one that actually loads an arbitrary sender-supplied
+  // file (through Security.localImageUrl), so that's what points at our
+  // own bundled icon below.
+  readonly property string notificationIcon: Qt.resolvedUrl("icon.svg").toString().replace(/^file:\/\//, "")
+
   // Threads the user's Settings → Language choice through every Strings.t()
   // call in this file, so a background poll's notification text honors it
   // too (not just Panel.qml's live UI).
@@ -175,6 +184,19 @@ Item {
         ? " (" + root.tr("notifyAndMore") + ")"
         : " (+" + (newItems.length - 1) + " " + root.tr("notifyMoreSuffix") + ")"
     }
+    // omarchy-notification-send takes this as its second positional
+    // ("description") and only treats it as literal text if it doesn't
+    // exactly match one of its own recognized flags (confirmed by reading
+    // /usr/share/omarchy/bin/omarchy-notification-send's known_flag()) — a
+    // title that happens to equal e.g. "--urgency=critical" or
+    // "--replace-id=1234" is silently parsed as that option instead, which
+    // can raise this notification's urgency or hijack another active one by
+    // numeric id, with the --exec click-argv right after it left untouched
+    // either way (so nothing errors to reveal it). Every such flag there
+    // necessarily starts with "-", so forcing this string not to (one
+    // leading space, imperceptible) defangs the whole class generically —
+    // including any flag the helper adds later, not just today's set.
+    if (body.charAt(0) === "-") body = " " + body
     // -g/--glyph is accepted but the shell's notification history doesn't
     // surface Nerd Font private-use glyphs (confirmed with a direct manual
     // omarchy-notification-send call, same empty "glyph" result) — skip it
@@ -199,6 +221,7 @@ Item {
       : ["omarchy-shell", "shell", "summon", "andersdosen.nrkreviews", "{}"]
     Util.execArgv([
       "omarchy-notification-send", "--app-name", "NRK Anmeldelser",
+      "--image", root.notificationIcon,
       headline, body,
       "--exec"
     ].concat(clickArgv))
